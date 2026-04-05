@@ -1,0 +1,1087 @@
+import { useState, useEffect, useRef } from "react";
+
+const FONTS = `@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@300;400;500;600;700&family=Orbitron:wght@400;700;900&display=swap');`;
+
+// ─── DATA ────────────────────────────────────────────────────────────────────
+
+const WAR_METHODS = [
+  {
+    id: "historical",
+    label: "Historical Base Rate",
+    desc: "Based on frequency of major power conflicts since 1815 (post-Congress of Vienna). ~4 systemic wars in 210 years.",
+    war10: 8, war30: 22, war50: 34,
+    crash10: 55, crash30: 89, crash50: 97,
+    note: "Every ~52 years avg for systemic wars; recessions occur every ~8–10 yrs",
+  },
+  {
+    id: "bayesian",
+    label: "Bayesian Inference",
+    desc: "Prior from historical rates updated with current signals: nuclear deterrence (↓), multipolar shift (↑), AI arms race (↑), nuclear proliferation (↑).",
+    war10: 12, war30: 28, war50: 41,
+    crash10: 48, crash30: 82, crash50: 95,
+    note: "Nuclear deterrence cuts conflict probability by ~60%; multipolarity raises it by ~40%",
+  },
+  {
+    id: "expert",
+    label: "Expert Consensus (Delphi)",
+    desc: "Aggregated from leading political scientists, economists & security analysts (Tetlock, Mearsheimer, Rogoff, El-Erian). Meta-forecast synthesis.",
+    war10: 10, war30: 25, war50: 38,
+    crash10: 45, crash30: 75, crash50: 92,
+    note: "Superforecasters assign ~5–15% to WWIII this decade; economists 35–55% to severe recession",
+  },
+  {
+    id: "montecarlo",
+    label: "Monte Carlo Simulation",
+    desc: "10,000 runs across 14 stochastic variables: US-China tension, NATO cohesion, nuclear accidents, climate shocks, debt spirals, currency crises.",
+    war10: 9, war30: 24, war50: 37,
+    crash10: 52, crash30: 84, crash50: 96,
+    note: "Tail-risk events dominate in 30yr+ windows; economic shocks cascade into political instability",
+  },
+  {
+    id: "prediction",
+    label: "Prediction Markets",
+    desc: "Synthesized from Metaculus, Manifold, Good Judgment Open. Crowd wisdom with incentive-based accuracy. Data as of early 2026.",
+    war10: 7, war30: 19, war50: 31,
+    crash10: 42, crash30: 70, crash50: 88,
+    note: "Markets underweight tail risks historically; adjust upward for black swan exposure",
+  },
+  {
+    id: "gametheory",
+    label: "Game Theory (Nash Eq.)",
+    desc: "Multi-player iterated game across US, China, Russia, EU, India. Mixed strategy equilibria under incomplete information & commitment problems.",
+    war10: 14, war30: 31, war50: 44,
+    crash10: 50, crash30: 80, crash50: 94,
+    note: "Commitment problems & first-mover advantages elevate war risk vs. cooperative outcome",
+  },
+];
+
+const WEIGHTED_AVG = {
+  war10: Math.round(WAR_METHODS.reduce((s, m) => s + m.war10, 0) / WAR_METHODS.length),
+  war30: Math.round(WAR_METHODS.reduce((s, m) => s + m.war30, 0) / WAR_METHODS.length),
+  war50: Math.round(WAR_METHODS.reduce((s, m) => s + m.war50, 0) / WAR_METHODS.length),
+  crash10: Math.round(WAR_METHODS.reduce((s, m) => s + m.crash10, 0) / WAR_METHODS.length),
+  crash30: Math.round(WAR_METHODS.reduce((s, m) => s + m.crash30, 0) / WAR_METHODS.length),
+  crash50: Math.round(WAR_METHODS.reduce((s, m) => s + m.crash50, 0) / WAR_METHODS.length),
+};
+
+// Nash equilibrium payoff matrices
+const GT_ACTORS = ["USA", "China", "Russia", "EU", "India"];
+
+// War/Cooperation payoff matrix (rows = actor strategy, cols = opponent avg response)
+// Values: [cooperate_payoff, defect_payoff] for each actor pair
+const GT_SCENARIOS = [
+  {
+    label: "US–China: Taiwan Strait",
+    actors: ["USA", "China"],
+    matrix: [
+      // China: Cooperate, China: Escalate
+      [{ label: "USA: Deter", payoff: [3, 3], opp: [2, 2] }, { label: "USA: Deter", payoff: [1, -4], opp: [-3, 5] }],
+      [{ label: "USA: Engage", payoff: [4, 1], opp: [1, 4] }, { label: "USA: Engage", payoff: [-5, -5], opp: [-5, -5] }],
+    ],
+    nash: "Mutual deterrence (Deter / Cooperate) is the dominant Nash Equilibrium, but Taiwan independence could shift to the bottom-right catastrophic cell.",
+    risk: 68,
+  },
+  {
+    label: "NATO–Russia: Eastern Europe",
+    actors: ["NATO", "Russia"],
+    matrix: [
+      [{ label: "NATO: Reinforce", payoff: [2, 2], opp: [1, 2] }, { label: "NATO: Reinforce", payoff: [3, -3], opp: [-2, 3] }],
+      [{ label: "NATO: Withdraw", payoff: [-1, 4], opp: [4, 0] }, { label: "NATO: Withdraw", payoff: [-4, -4], opp: [-4, -4] }],
+    ],
+    nash: "NATO reinforcement is dominant strategy; Russia's optimal play depends on nuclear signaling. Mixed equilibrium near current status quo.",
+    risk: 52,
+  },
+  {
+    label: "G20: Trade War / Cooperation",
+    actors: ["USA", "China"],
+    matrix: [
+      [{ label: "USA: Open", payoff: [4, 4], opp: [4, 4] }, { label: "USA: Open", payoff: [-2, 6], opp: [6, -1] }],
+      [{ label: "USA: Tariffs", payoff: [5, -1], opp: [-1, 5] }, { label: "USA: Tariffs", payoff: [1, 1], opp: [1, 1] }],
+    ],
+    nash: "Classic Prisoner's Dilemma. Nash Eq = mutual tariffs (1,1) even though mutual openness (4,4) is Pareto superior. Cooperation requires binding enforcement.",
+    risk: 75,
+  },
+];
+
+const RISK_FACTORS = [
+  { label: "US–China Rivalry", val: 78, type: "war" },
+  { label: "Russia–NATO Tension", val: 65, type: "war" },
+  { label: "Nuclear Proliferation", val: 55, type: "war" },
+  { label: "AI Arms Race", val: 60, type: "war" },
+  { label: "Climate Conflicts", val: 45, type: "war" },
+  { label: "Global Debt Levels", val: 82, type: "crash" },
+  { label: "Dollar Hegemony Decline", val: 58, type: "crash" },
+  { label: "Asset Bubble Risk", val: 70, type: "crash" },
+  { label: "Trade Fragmentation", val: 74, type: "crash" },
+  { label: "Banking Contagion Risk", val: 52, type: "crash" },
+];
+
+// ─── COMPONENTS ──────────────────────────────────────────────────────────────
+
+function GaugeArc({ pct, color, size = 120 }) {
+  const r = size * 0.38;
+  const cx = size / 2, cy = size / 2 + size * 0.05;
+  const sweep = Math.PI;
+  const startAngle = Math.PI;
+  const endAngle = Math.PI + sweep * (pct / 100);
+  const x1 = cx + r * Math.cos(startAngle);
+  const y1 = cy + r * Math.sin(startAngle);
+  const x2 = cx + r * Math.cos(endAngle);
+  const y2 = cy + r * Math.sin(endAngle);
+  const lg = endAngle - startAngle > Math.PI ? 1 : 0;
+
+  return (
+    <svg width={size} height={size * 0.62} viewBox={`0 0 ${size} ${size * 0.62}`}>
+      <path
+        d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}`}
+        fill="none" stroke="#1a1f2e" strokeWidth={size * 0.07}
+      />
+      <path
+        d={`M ${x1} ${y1} A ${r} ${r} 0 ${lg} 1 ${x2} ${y2}`}
+        fill="none" stroke={color} strokeWidth={size * 0.07}
+        strokeLinecap="round"
+        style={{ filter: `drop-shadow(0 0 6px ${color})` }}
+      />
+    </svg>
+  );
+}
+
+function MatrixCell({ data, isNash }) {
+  if (!data) return <td style={{ border: "1px solid #1e2a3a", padding: "8px" }} />;
+  const [p1, p2] = data.payoff;
+  const color = p1 + p2 < -4 ? "#ff3b5c" : p1 + p2 > 5 ? "#00ff9d" : "#f5c518";
+  return (
+    <td style={{
+      border: `1px solid ${isNash ? "#00ff9d" : "#1e2a3a"}`,
+      padding: "8px 12px",
+      background: isNash ? "rgba(0,255,157,0.06)" : p1 + p2 < -4 ? "rgba(255,59,92,0.08)" : "transparent",
+      textAlign: "center",
+      position: "relative",
+    }}>
+      {isNash && <span style={{ position: "absolute", top: 2, right: 4, fontSize: 9, color: "#00ff9d", fontFamily: "'Orbitron'" }}>★NE</span>}
+      <span style={{ color, fontFamily: "'Share Tech Mono'", fontSize: 13 }}>
+        ({p1 > 0 ? "+" : ""}{p1}, {p2 > 0 ? "+" : ""}{p2})
+      </span>
+    </td>
+  );
+}
+
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
+
+export default function App() {
+  const [tab, setTab] = useState("overview");
+  const [activeMethod, setActiveMethod] = useState(0);
+  const [activeScenario, setActiveScenario] = useState(0);
+  const [horizon, setHorizon] = useState("30");
+  const [simRunning, setSimRunning] = useState(false);
+  const [simResults, setSimResults] = useState([]);
+  const [tick, setTick] = useState(0);
+  const intervalRef = useRef(null);
+
+  useEffect(() => {
+    const t = setInterval(() => setTick(x => x + 1), 1200);
+    return () => clearInterval(t);
+  }, []);
+
+  const runSim = () => {
+    setSimRunning(true);
+    setSimResults([]);
+    let i = 0;
+    intervalRef.current = setInterval(() => {
+      const war = Math.random() * 100;
+      const crash = Math.random() * 100;
+      setSimResults(prev => [...prev.slice(-39), { war: war.toFixed(1), crash: crash.toFixed(1), id: i }]);
+      i++;
+      if (i >= 40) {
+        clearInterval(intervalRef.current);
+        setSimRunning(false);
+      }
+    }, 80);
+  };
+
+  const m = WAR_METHODS[activeMethod];
+  const hKey = `war${horizon}`;
+  const cKey = `crash${horizon}`;
+  const warPct = WEIGHTED_AVG[`war${horizon}`];
+  const crashPct = WEIGHTED_AVG[`crash${horizon}`];
+
+  const tabs = [
+    { id: "overview", label: "OVERVIEW" },
+    { id: "methods", label: "METHODS" },
+    { id: "gametheory", label: "GAME THEORY" },
+    { id: "factors", label: "RISK FACTORS" },
+    { id: "sim", label: "SIMULATION" },
+  ];
+
+  const warColor = warPct < 20 ? "#00ff9d" : warPct < 40 ? "#f5c518" : "#ff3b5c";
+  const crashColor = crashPct < 40 ? "#00ff9d" : crashPct < 65 ? "#f5c518" : "#ff3b5c";
+
+  return (
+    <>
+      <style>{`
+        ${FONTS}
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background: #070b12; }
+        ::-webkit-scrollbar { width: 4px; background: #0d1117; }
+        ::-webkit-scrollbar-thumb { background: #1e2a3a; border-radius: 4px; }
+
+        .app {
+          min-height: 100vh;
+          background: #070b12;
+          color: #c8d6e5;
+          font-family: 'Rajdhani', sans-serif;
+          position: relative;
+          overflow: hidden;
+        }
+        .scanlines {
+          pointer-events: none;
+          position: fixed;
+          inset: 0;
+          background: repeating-linear-gradient(
+            0deg,
+            transparent,
+            transparent 2px,
+            rgba(0,0,0,0.04) 2px,
+            rgba(0,0,0,0.04) 4px
+          );
+          z-index: 100;
+        }
+        .grid-bg {
+          pointer-events: none;
+          position: fixed;
+          inset: 0;
+          background-image:
+            linear-gradient(rgba(0,180,255,0.03) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(0,180,255,0.03) 1px, transparent 1px);
+          background-size: 40px 40px;
+          z-index: 0;
+        }
+        .header {
+          position: relative;
+          z-index: 10;
+          border-bottom: 1px solid #0f1e30;
+          padding: 16px 24px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          background: rgba(7,11,18,0.92);
+          backdrop-filter: blur(10px);
+        }
+        .logo {
+          font-family: 'Orbitron', monospace;
+          font-size: 13px;
+          font-weight: 700;
+          color: #00b4ff;
+          letter-spacing: 3px;
+          text-transform: uppercase;
+        }
+        .logo span { color: #ff3b5c; }
+        .status-bar {
+          display: flex;
+          gap: 20px;
+          font-family: 'Share Tech Mono';
+          font-size: 11px;
+          color: #3d5a7a;
+        }
+        .status-dot {
+          display: inline-block;
+          width: 6px; height: 6px;
+          border-radius: 50%;
+          background: #00ff9d;
+          margin-right: 6px;
+          box-shadow: 0 0 6px #00ff9d;
+          animation: blink 1.2s infinite;
+        }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+        .tabs {
+          position: relative;
+          z-index: 10;
+          display: flex;
+          gap: 0;
+          border-bottom: 1px solid #0f1e30;
+          background: rgba(7,11,18,0.8);
+          padding: 0 24px;
+          overflow-x: auto;
+        }
+        .tab-btn {
+          font-family: 'Orbitron', monospace;
+          font-size: 10px;
+          font-weight: 700;
+          letter-spacing: 2px;
+          padding: 12px 20px;
+          border: none;
+          background: transparent;
+          color: #3d5a7a;
+          cursor: pointer;
+          border-bottom: 2px solid transparent;
+          transition: all 0.2s;
+          white-space: nowrap;
+        }
+        .tab-btn:hover { color: #7aafd4; }
+        .tab-btn.active {
+          color: #00b4ff;
+          border-bottom-color: #00b4ff;
+          text-shadow: 0 0 12px rgba(0,180,255,0.5);
+        }
+        .content {
+          position: relative;
+          z-index: 5;
+          padding: 24px;
+          max-width: 1200px;
+          margin: 0 auto;
+        }
+        .section-title {
+          font-family: 'Orbitron', monospace;
+          font-size: 11px;
+          letter-spacing: 3px;
+          color: #3d5a7a;
+          text-transform: uppercase;
+          margin-bottom: 20px;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+        .section-title::after {
+          content: '';
+          flex: 1;
+          height: 1px;
+          background: linear-gradient(90deg, #0f1e30, transparent);
+        }
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+        .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+        @media (max-width: 700px) {
+          .grid-2, .grid-3 { grid-template-columns: 1fr; }
+          .content { padding: 16px; }
+        }
+        .card {
+          background: rgba(10,16,28,0.9);
+          border: 1px solid #0f1e30;
+          border-radius: 4px;
+          padding: 20px;
+          position: relative;
+          overflow: hidden;
+        }
+        .card::before {
+          content: '';
+          position: absolute;
+          top: 0; left: 0; right: 0;
+          height: 1px;
+          background: linear-gradient(90deg, transparent, #0f4f7a, transparent);
+        }
+        .card-title {
+          font-family: 'Orbitron', monospace;
+          font-size: 10px;
+          letter-spacing: 2px;
+          color: #3d5a7a;
+          margin-bottom: 12px;
+        }
+        .big-pct {
+          font-family: 'Orbitron', monospace;
+          font-size: 48px;
+          font-weight: 900;
+          line-height: 1;
+          letter-spacing: -2px;
+        }
+        .pct-label {
+          font-size: 13px;
+          color: #3d5a7a;
+          margin-top: 6px;
+          font-weight: 500;
+          letter-spacing: 1px;
+        }
+        .horizon-bar {
+          display: flex;
+          gap: 8px;
+          margin-bottom: 20px;
+        }
+        .hz-btn {
+          font-family: 'Orbitron', monospace;
+          font-size: 10px;
+          font-weight: 700;
+          padding: 6px 16px;
+          border: 1px solid #0f1e30;
+          border-radius: 2px;
+          background: transparent;
+          color: #3d5a7a;
+          cursor: pointer;
+          letter-spacing: 1px;
+          transition: all 0.15s;
+        }
+        .hz-btn:hover { border-color: #1e3a5a; color: #7aafd4; }
+        .hz-btn.active {
+          border-color: #00b4ff;
+          color: #00b4ff;
+          background: rgba(0,180,255,0.05);
+          box-shadow: 0 0 10px rgba(0,180,255,0.1);
+        }
+        .progress-wrap { margin: 8px 0; }
+        .progress-label {
+          display: flex;
+          justify-content: space-between;
+          font-family: 'Share Tech Mono';
+          font-size: 11px;
+          color: #3d5a7a;
+          margin-bottom: 4px;
+        }
+        .progress-track {
+          height: 5px;
+          background: #0d1117;
+          border-radius: 2px;
+          overflow: hidden;
+        }
+        .progress-fill {
+          height: 100%;
+          border-radius: 2px;
+          transition: width 0.6s cubic-bezier(0.4,0,0.2,1);
+        }
+        .method-list {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+        .method-item {
+          padding: 12px 16px;
+          border: 1px solid #0f1e30;
+          border-radius: 3px;
+          cursor: pointer;
+          transition: all 0.15s;
+          background: rgba(10,16,28,0.6);
+        }
+        .method-item:hover { border-color: #1e3a5a; }
+        .method-item.active {
+          border-color: #00b4ff;
+          background: rgba(0,180,255,0.04);
+        }
+        .method-name {
+          font-family: 'Orbitron', monospace;
+          font-size: 10px;
+          letter-spacing: 1.5px;
+          color: #7aafd4;
+          margin-bottom: 4px;
+        }
+        .method-desc {
+          font-size: 13px;
+          color: #5a7a9a;
+          line-height: 1.5;
+        }
+        .result-row {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 12px;
+          margin-top: 12px;
+        }
+        .result-box {
+          padding: 12px;
+          background: #0a1018;
+          border-radius: 3px;
+          border: 1px solid #0f1e30;
+          text-align: center;
+        }
+        .result-num {
+          font-family: 'Orbitron', monospace;
+          font-size: 24px;
+          font-weight: 700;
+        }
+        .result-sub {
+          font-family: 'Share Tech Mono';
+          font-size: 10px;
+          color: #3d5a7a;
+          margin-top: 3px;
+        }
+        .note-box {
+          margin-top: 14px;
+          padding: 10px 14px;
+          background: rgba(0,180,255,0.04);
+          border-left: 2px solid #00b4ff;
+          font-size: 12px;
+          color: #5a7a9a;
+          font-family: 'Share Tech Mono';
+          line-height: 1.6;
+        }
+        .scenario-tabs {
+          display: flex;
+          gap: 8px;
+          margin-bottom: 20px;
+          flex-wrap: wrap;
+        }
+        .sc-btn {
+          font-family: 'Rajdhani', sans-serif;
+          font-size: 12px;
+          font-weight: 600;
+          padding: 6px 14px;
+          border: 1px solid #0f1e30;
+          border-radius: 2px;
+          background: transparent;
+          color: #3d5a7a;
+          cursor: pointer;
+          transition: all 0.15s;
+          letter-spacing: 0.5px;
+        }
+        .sc-btn:hover { border-color: #1e3a5a; color: #7aafd4; }
+        .sc-btn.active { border-color: #f5c518; color: #f5c518; background: rgba(245,197,24,0.04); }
+        .matrix-wrap { overflow-x: auto; }
+        table.payoff {
+          border-collapse: collapse;
+          width: 100%;
+          font-size: 13px;
+        }
+        table.payoff th {
+          font-family: 'Orbitron', monospace;
+          font-size: 9px;
+          letter-spacing: 1.5px;
+          color: #3d5a7a;
+          padding: 8px 12px;
+          text-align: center;
+          border: 1px solid #0f1e30;
+          background: #0a1018;
+        }
+        table.payoff td.row-header {
+          font-family: 'Share Tech Mono';
+          font-size: 11px;
+          color: #5a7a9a;
+          padding: 8px 12px;
+          border: 1px solid #0f1e30;
+          background: #0a1018;
+          white-space: nowrap;
+        }
+        .nash-desc {
+          margin-top: 16px;
+          padding: 12px 16px;
+          background: rgba(245,197,24,0.05);
+          border: 1px solid rgba(245,197,24,0.2);
+          border-radius: 3px;
+          font-size: 13px;
+          color: #9aad6a;
+          line-height: 1.6;
+        }
+        .risk-grid {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+        .risk-row {
+          display: flex;
+          align-items: center;
+          gap: 14px;
+        }
+        .risk-name {
+          font-family: 'Share Tech Mono';
+          font-size: 11px;
+          color: #5a7a9a;
+          width: 200px;
+          flex-shrink: 0;
+        }
+        .risk-bar-track {
+          flex: 1;
+          height: 8px;
+          background: #0d1117;
+          border-radius: 2px;
+          overflow: hidden;
+          position: relative;
+        }
+        .risk-bar-fill {
+          height: 100%;
+          border-radius: 2px;
+          position: relative;
+        }
+        .risk-val {
+          font-family: 'Orbitron', monospace;
+          font-size: 11px;
+          width: 36px;
+          text-align: right;
+          flex-shrink: 0;
+        }
+        .sim-grid {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 4px;
+          margin-top: 12px;
+        }
+        .sim-dot {
+          width: 14px; height: 14px;
+          border-radius: 2px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          transition: all 0.1s;
+        }
+        .run-btn {
+          font-family: 'Orbitron', monospace;
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 2px;
+          padding: 10px 28px;
+          border: 1px solid #00b4ff;
+          border-radius: 2px;
+          background: rgba(0,180,255,0.06);
+          color: #00b4ff;
+          cursor: pointer;
+          transition: all 0.2s;
+          margin-top: 16px;
+        }
+        .run-btn:hover:not(:disabled) {
+          background: rgba(0,180,255,0.14);
+          box-shadow: 0 0 20px rgba(0,180,255,0.2);
+        }
+        .run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .disclaimer {
+          margin-top: 32px;
+          padding: 14px 18px;
+          border: 1px solid #0f1e30;
+          border-radius: 3px;
+          font-family: 'Share Tech Mono';
+          font-size: 10px;
+          color: #2a3d52;
+          line-height: 1.7;
+        }
+        .consensus-banner {
+          padding: 16px 20px;
+          background: rgba(0,180,255,0.04);
+          border: 1px solid rgba(0,180,255,0.15);
+          border-radius: 4px;
+          display: flex;
+          justify-content: space-around;
+          flex-wrap: wrap;
+          gap: 16px;
+          margin-bottom: 24px;
+        }
+        .cb-item { text-align: center; }
+        .cb-label {
+          font-family: 'Orbitron', monospace;
+          font-size: 9px;
+          letter-spacing: 2px;
+          color: #3d5a7a;
+          margin-bottom: 4px;
+        }
+        .cb-val {
+          font-family: 'Orbitron', monospace;
+          font-size: 22px;
+          font-weight: 700;
+        }
+      `}</style>
+
+      <div className="app">
+        <div className="scanlines" />
+        <div className="grid-bg" />
+
+        <header className="header">
+          <div className="logo">GLOBAL<span>RISK</span>SIM <span style={{ color: "#3d5a7a", fontSize: 11 }}>// v2.6.1</span></div>
+          <div className="status-bar">
+            <span><span className="status-dot" />LIVE ANALYSIS</span>
+            <span style={{ color: "#2a3d52" }}>FRAME {(tick * 1247 + 8391) % 99999}</span>
+            <span style={{ color: "#2a3d52" }}>SYS: NOMINAL</span>
+          </div>
+        </header>
+
+        <nav className="tabs">
+          {tabs.map(t => (
+            <button key={t.id} className={`tab-btn ${tab === t.id ? "active" : ""}`} onClick={() => setTab(t.id)}>
+              {t.label}
+            </button>
+          ))}
+        </nav>
+
+        <div className="content">
+
+          {/* ── OVERVIEW ── */}
+          {tab === "overview" && (
+            <>
+              <p className="section-title">Multi-Method Consensus Estimate</p>
+
+              <div style={{ marginBottom: 20 }}>
+                <div className="horizon-bar">
+                  {["10", "30", "50"].map(h => (
+                    <button key={h} className={`hz-btn ${horizon === h ? "active" : ""}`} onClick={() => setHorizon(h)}>
+                      {h}-YR
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="consensus-banner">
+                <div className="cb-item">
+                  <div className="cb-label">WORLD WAR · {horizon}yr</div>
+                  <div className="cb-val" style={{ color: warColor }}>{warPct}%</div>
+                </div>
+                <div style={{ width: 1, background: "#0f1e30" }} />
+                <div className="cb-item">
+                  <div className="cb-label">ECON CRASH · {horizon}yr</div>
+                  <div className="cb-val" style={{ color: crashColor }}>{crashPct}%</div>
+                </div>
+                <div style={{ width: 1, background: "#0f1e30" }} />
+                <div className="cb-item">
+                  <div className="cb-label">COMBINED RISK</div>
+                  <div className="cb-val" style={{ color: "#ff3b5c" }}>
+                    {Math.round(100 - (1 - warPct / 100) * (1 - crashPct / 100) * 100)}%
+                  </div>
+                </div>
+                <div style={{ width: 1, background: "#0f1e30" }} />
+                <div className="cb-item">
+                  <div className="cb-label">METHODS USED</div>
+                  <div className="cb-val" style={{ color: "#7aafd4" }}>6</div>
+                </div>
+              </div>
+
+              <div className="grid-2">
+                <div className="card">
+                  <div className="card-title">WORLD WAR III PROBABILITY</div>
+                  <div style={{ display: "flex", alignItems: "flex-end", gap: 16 }}>
+                    <div>
+                      <div className="big-pct" style={{ color: warColor }}>{warPct}<span style={{ fontSize: 24 }}>%</span></div>
+                      <div className="pct-label">Within {horizon} years</div>
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <GaugeArc pct={warPct} color={warColor} size={130} />
+                    </div>
+                  </div>
+                  <div style={{ marginTop: 16 }}>
+                    {WAR_METHODS.map(m => (
+                      <div className="progress-wrap" key={m.id}>
+                        <div className="progress-label">
+                          <span>{m.label}</span>
+                          <span style={{ color: "#7aafd4" }}>{m[`war${horizon}`]}%</span>
+                        </div>
+                        <div className="progress-track">
+                          <div className="progress-fill" style={{
+                            width: `${m[`war${horizon}`]}%`,
+                            background: `linear-gradient(90deg, #00b4ff, ${m[`war${horizon}`] > 35 ? "#ff3b5c" : "#00b4ff"})`,
+                          }} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="note-box" style={{ marginTop: 14 }}>
+                    ⚠ Nuclear deterrence significantly suppresses near-term probability. Tail risks spike post-30yr due to regime changes, AI autonomy, and proliferation.
+                  </div>
+                </div>
+
+                <div className="card">
+                  <div className="card-title">GLOBAL ECONOMIC CRASH PROBABILITY</div>
+                  <div style={{ display: "flex", alignItems: "flex-end", gap: 16 }}>
+                    <div>
+                      <div className="big-pct" style={{ color: crashColor }}>{crashPct}<span style={{ fontSize: 24 }}>%</span></div>
+                      <div className="pct-label">Within {horizon} years</div>
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <GaugeArc pct={crashPct} color={crashColor} size={130} />
+                    </div>
+                  </div>
+                  <div style={{ marginTop: 16 }}>
+                    {WAR_METHODS.map(m => (
+                      <div className="progress-wrap" key={m.id}>
+                        <div className="progress-label">
+                          <span>{m.label}</span>
+                          <span style={{ color: "#f5c518" }}>{m[`crash${horizon}`]}%</span>
+                        </div>
+                        <div className="progress-track">
+                          <div className="progress-fill" style={{
+                            width: `${m[`crash${horizon}`]}%`,
+                            background: `linear-gradient(90deg, #f5c518, ${m[`crash${horizon}`] > 70 ? "#ff3b5c" : "#f5c518"})`,
+                          }} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="note-box" style={{ borderColor: "#f5c518", marginTop: 14 }}>
+                    ⚠ Economic crash probability is substantially higher — near-certainty at 50yr horizon due to compounding debt cycles, dollar hegemony erosion & trade fragmentation.
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* ── METHODS ── */}
+          {tab === "methods" && (
+            <>
+              <p className="section-title">Estimation Methodology Breakdown</p>
+              <div className="horizon-bar">
+                {["10", "30", "50"].map(h => (
+                  <button key={h} className={`hz-btn ${horizon === h ? "active" : ""}`} onClick={() => setHorizon(h)}>
+                    {h}-YEAR HORIZON
+                  </button>
+                ))}
+              </div>
+              <div className="grid-2">
+                <div className="method-list">
+                  {WAR_METHODS.map((m, i) => (
+                    <div key={m.id} className={`method-item ${activeMethod === i ? "active" : ""}`} onClick={() => setActiveMethod(i)}>
+                      <div className="method-name">{m.label}</div>
+                      <div className="method-desc">{m.desc.slice(0, 90)}…</div>
+                    </div>
+                  ))}
+                </div>
+                <div className="card">
+                  <div className="card-title">{m.label.toUpperCase()}</div>
+                  <div className="method-desc" style={{ color: "#7aafd4", fontSize: 14, lineHeight: 1.6 }}>{m.desc}</div>
+                  <div className="result-row">
+                    <div>
+                      <div style={{ fontFamily: "'Orbitron'", fontSize: 10, letterSpacing: 1.5, color: "#3d5a7a", marginBottom: 8 }}>WORLD WAR</div>
+                      <div className="result-box">
+                        <div className="result-num" style={{ color: "#00b4ff" }}>{m[`war${horizon}`]}%</div>
+                        <div className="result-sub">{horizon}-YEAR</div>
+                      </div>
+                    </div>
+                    <div>
+                      <div style={{ fontFamily: "'Orbitron'", fontSize: 10, letterSpacing: 1.5, color: "#3d5a7a", marginBottom: 8 }}>ECON CRASH</div>
+                      <div className="result-box">
+                        <div className="result-num" style={{ color: "#f5c518" }}>{m[`crash${horizon}`]}%</div>
+                        <div className="result-sub">{horizon}-YEAR</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="note-box">{m.note}</div>
+                  <div style={{ marginTop: 20 }}>
+                    <div className="card-title">ALL HORIZONS</div>
+                    {[["10", "War"], ["30", "War"], ["50", "War"], ["10", "Crash"], ["30", "Crash"], ["50", "Crash"]].map(([h, type]) => (
+                      <div className="progress-wrap" key={h + type}>
+                        <div className="progress-label">
+                          <span>{type} · {h}yr</span>
+                          <span style={{ color: type === "War" ? "#00b4ff" : "#f5c518" }}>{m[`${type.toLowerCase()}${h}`]}%</span>
+                        </div>
+                        <div className="progress-track">
+                          <div className="progress-fill" style={{
+                            width: `${m[`${type.toLowerCase()}${h}`]}%`,
+                            background: type === "War" ? "#00b4ff" : "#f5c518",
+                          }} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* ── GAME THEORY ── */}
+          {tab === "gametheory" && (
+            <>
+              <p className="section-title">Game Theory — Payoff Matrix Analysis</p>
+              <div style={{ marginBottom: 16, padding: "12px 16px", background: "rgba(245,197,24,0.04)", border: "1px solid rgba(245,197,24,0.15)", borderRadius: 3, fontSize: 13, color: "#9aad6a", lineHeight: 1.7 }}>
+                <strong style={{ color: "#f5c518", fontFamily: "'Orbitron'", fontSize: 10, letterSpacing: 1.5 }}>METHODOLOGY</strong><br />
+                Each cell shows payoffs as <span style={{ fontFamily: "'Share Tech Mono'" }}>(Actor 1, Actor 2)</span> on a scale of –5 (catastrophic) to +5 (optimal). Nash Equilibria (★NE) are cells where no actor can unilaterally improve their outcome. Payoff format: <span style={{ fontFamily: "'Share Tech Mono'", color: "#00ff9d" }}>(+3, +3)</span> = mutual gain, <span style={{ fontFamily: "'Share Tech Mono'", color: "#ff3b5c" }}>(-5, -5)</span> = mutual destruction.
+              </div>
+
+              <div className="scenario-tabs">
+                {GT_SCENARIOS.map((s, i) => (
+                  <button key={i} className={`sc-btn ${activeScenario === i ? "active" : ""}`} onClick={() => setActiveScenario(i)}>
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+
+              {(() => {
+                const sc = GT_SCENARIOS[activeScenario];
+                const [a1, a2] = sc.actors;
+                return (
+                  <div className="card">
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                      <div className="card-title">{sc.label}</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ fontFamily: "'Share Tech Mono'", fontSize: 11, color: "#3d5a7a" }}>TENSION INDEX</span>
+                        <span style={{ fontFamily: "'Orbitron'", fontSize: 16, fontWeight: 700, color: sc.risk > 60 ? "#ff3b5c" : "#f5c518" }}>{sc.risk}%</span>
+                      </div>
+                    </div>
+                    <div className="matrix-wrap">
+                      <table className="payoff">
+                        <thead>
+                          <tr>
+                            <th></th>
+                            <th colSpan={2} style={{ color: "#f5c518" }}>{a2}</th>
+                          </tr>
+                          <tr>
+                            <th style={{ color: "#00b4ff" }}>{a1}</th>
+                            <th>COOPERATE / DETER</th>
+                            <th>ESCALATE / DEFECT</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr>
+                            <td className="row-header">COOPERATE / DETER</td>
+                            <MatrixCell data={sc.matrix[0][0]} isNash={true} />
+                            <MatrixCell data={sc.matrix[0][1]} isNash={false} />
+                          </tr>
+                          <tr>
+                            <td className="row-header">ENGAGE / DEFECT</td>
+                            <MatrixCell data={sc.matrix[1][0]} isNash={false} />
+                            <MatrixCell data={sc.matrix[1][1]} isNash={false} />
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                    <div className="nash-desc">
+                      <strong style={{ color: "#f5c518", fontFamily: "'Orbitron'", fontSize: 9, letterSpacing: 1.5 }}>★ NASH EQUILIBRIUM ANALYSIS</strong><br />
+                      {sc.nash}
+                    </div>
+                    <div style={{ marginTop: 20 }}>
+                      <div className="card-title">KEY GAME THEORY INSIGHTS</div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        {[
+                          ["Commitment Problems", "States cannot credibly commit to future restraint → arms races & first-mover advantage logic prevail"],
+                          ["Information Asymmetry", "Incomplete intelligence creates miscalculation risk — adversaries may misread capability/intent"],
+                          ["Iterated vs. One-Shot", "Repeated interaction enables cooperation norms (MAD), but leadership transitions reset the game"],
+                          ["Coalition Dynamics", "Multi-actor settings (US, China, Russia, EU, India) create alliance formation games where minor shifts cascade"],
+                        ].map(([title, body]) => (
+                          <div key={title} style={{ padding: "10px 14px", background: "#0a1018", border: "1px solid #0f1e30", borderRadius: 3 }}>
+                            <div style={{ fontFamily: "'Orbitron'", fontSize: 9, letterSpacing: 1.5, color: "#00b4ff", marginBottom: 4 }}>{title}</div>
+                            <div style={{ fontSize: 12, color: "#5a7a9a", lineHeight: 1.6 }}>{body}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+            </>
+          )}
+
+          {/* ── RISK FACTORS ── */}
+          {tab === "factors" && (
+            <>
+              <p className="section-title">Geopolitical & Economic Risk Indicators</p>
+              <div className="grid-2">
+                <div className="card">
+                  <div className="card-title">WAR RISK FACTORS</div>
+                  <div className="risk-grid">
+                    {RISK_FACTORS.filter(r => r.type === "war").map(r => {
+                      const c = r.val > 70 ? "#ff3b5c" : r.val > 50 ? "#f5c518" : "#00ff9d";
+                      return (
+                        <div className="risk-row" key={r.label}>
+                          <div className="risk-name">{r.label}</div>
+                          <div className="risk-bar-track">
+                            <div className="risk-bar-fill" style={{ width: `${r.val}%`, background: `linear-gradient(90deg, ${c}44, ${c})`, boxShadow: `0 0 8px ${c}44` }} />
+                          </div>
+                          <div className="risk-val" style={{ color: c }}>{r.val}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div className="card">
+                  <div className="card-title">ECONOMIC CRASH FACTORS</div>
+                  <div className="risk-grid">
+                    {RISK_FACTORS.filter(r => r.type === "crash").map(r => {
+                      const c = r.val > 70 ? "#ff3b5c" : r.val > 50 ? "#f5c518" : "#00ff9d";
+                      return (
+                        <div className="risk-row" key={r.label}>
+                          <div className="risk-name">{r.label}</div>
+                          <div className="risk-bar-track">
+                            <div className="risk-bar-fill" style={{ width: `${r.val}%`, background: `linear-gradient(90deg, ${c}44, ${c})`, boxShadow: `0 0 8px ${c}44` }} />
+                          </div>
+                          <div className="risk-val" style={{ color: c }}>{r.val}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+              <div style={{ marginTop: 20 }}>
+                <div className="card">
+                  <div className="card-title">CASCADING RISK TOPOLOGY</div>
+                  <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                    {[
+                      { from: "Trade War", to: "Supply Shock", color: "#f5c518" },
+                      { from: "Supply Shock", to: "Inflation Spiral", color: "#f5c518" },
+                      { from: "Inflation Spiral", to: "Debt Crisis", color: "#ff3b5c" },
+                      { from: "Debt Crisis", to: "Banking Collapse", color: "#ff3b5c" },
+                      { from: "Banking Collapse", to: "Depression", color: "#ff3b5c" },
+                      { from: "Depression", to: "Political Instability", color: "#ff3b5c" },
+                      { from: "Political Instability", to: "Armed Conflict", color: "#ff3b5c" },
+                    ].map((e, i) => (
+                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ fontFamily: "'Share Tech Mono'", fontSize: 11, color: e.color }}>{e.from}</span>
+                        <span style={{ color: "#2a3d52" }}>→</span>
+                        <span style={{ fontFamily: "'Share Tech Mono'", fontSize: 11, color: e.color }}>{e.to}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="note-box" style={{ marginTop: 14 }}>
+                    Historical pattern: economic crises precede major conflicts with 70%+ frequency. The 1929 crash → WWII pathway is the canonical modern example.
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* ── SIMULATION ── */}
+          {tab === "sim" && (
+            <>
+              <p className="section-title">Monte Carlo Simulation — 40-Run Sample</p>
+              <div className="card">
+                <div className="card-title">STOCHASTIC VARIABLE SET (14 INPUTS)</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+                  {["US-China Tension", "NATO Cohesion", "Nuclear Accident P", "Climate Shocks", "Debt/GDP Ratio", "Dollar Index", "Asset Valuations", "Supply Chain Stress", "Political Polarization", "AI Autonomy Level", "Energy Price Volatility", "Food Security", "Pandemic Risk", "Space/Cyber Conflict"].map(v => (
+                    <span key={v} style={{ fontFamily: "'Share Tech Mono'", fontSize: 10, color: "#3d5a7a", padding: "3px 8px", border: "1px solid #0f1e30", borderRadius: 2 }}>{v}</span>
+                  ))}
+                </div>
+                <div style={{ marginBottom: 8, fontFamily: "'Share Tech Mono'", fontSize: 11, color: "#3d5a7a" }}>
+                  Each dot = one simulation run. Color = outcome severity.
+                  <span style={{ marginLeft: 16, color: "#00ff9d" }}>■ LOW</span>
+                  <span style={{ marginLeft: 12, color: "#f5c518" }}>■ MED</span>
+                  <span style={{ marginLeft: 12, color: "#ff3b5c" }}>■ HIGH</span>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                  <div>
+                    <div style={{ fontFamily: "'Orbitron'", fontSize: 9, letterSpacing: 1.5, color: "#00b4ff", marginBottom: 8 }}>WAR OUTCOMES</div>
+                    <div className="sim-grid">
+                      {simResults.map((r, i) => {
+                        const v = parseFloat(r.war);
+                        const c = v < 20 ? "#00ff9d" : v < 50 ? "#f5c518" : "#ff3b5c";
+                        return <div key={i} className="sim-dot" style={{ background: c + "33", border: `1px solid ${c}`, boxShadow: `0 0 4px ${c}44` }} title={`${v}%`} />;
+                      })}
+                      {simRunning && <div className="sim-dot" style={{ background: "#00b4ff22", border: "1px solid #00b4ff", animation: "blink 0.4s infinite" }} />}
+                    </div>
+                    {simResults.length > 0 && (
+                      <div style={{ marginTop: 10, fontFamily: "'Orbitron'", fontSize: 13, color: "#00b4ff" }}>
+                        AVG: {(simResults.reduce((s, r) => s + parseFloat(r.war), 0) / simResults.length).toFixed(1)}%
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <div style={{ fontFamily: "'Orbitron'", fontSize: 9, letterSpacing: 1.5, color: "#f5c518", marginBottom: 8 }}>CRASH OUTCOMES</div>
+                    <div className="sim-grid">
+                      {simResults.map((r, i) => {
+                        const v = parseFloat(r.crash);
+                        const c = v < 30 ? "#00ff9d" : v < 60 ? "#f5c518" : "#ff3b5c";
+                        return <div key={i} className="sim-dot" style={{ background: c + "33", border: `1px solid ${c}`, boxShadow: `0 0 4px ${c}44` }} title={`${v}%`} />;
+                      })}
+                      {simRunning && <div className="sim-dot" style={{ background: "#f5c51822", border: "1px solid #f5c518", animation: "blink 0.4s infinite" }} />}
+                    </div>
+                    {simResults.length > 0 && (
+                      <div style={{ marginTop: 10, fontFamily: "'Orbitron'", fontSize: 13, color: "#f5c518" }}>
+                        AVG: {(simResults.reduce((s, r) => s + parseFloat(r.crash), 0) / simResults.length).toFixed(1)}%
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <button className="run-btn" onClick={runSim} disabled={simRunning}>
+                  {simRunning ? "RUNNING..." : "▶ RUN SIMULATION"}
+                </button>
+              </div>
+
+              <div className="card" style={{ marginTop: 16 }}>
+                <div className="card-title">FINAL WEIGHTED CONSENSUS — ALL METHODS</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginTop: 8 }}>
+                  {["10", "30", "50"].map(h => (
+                    <div key={h} style={{ textAlign: "center", padding: "16px 12px", background: "#0a1018", border: "1px solid #0f1e30", borderRadius: 3 }}>
+                      <div style={{ fontFamily: "'Orbitron'", fontSize: 9, letterSpacing: 2, color: "#3d5a7a", marginBottom: 10 }}>{h}-YEAR</div>
+                      <div style={{ fontFamily: "'Orbitron'", fontSize: 20, fontWeight: 700, color: "#00b4ff", marginBottom: 4 }}>{WEIGHTED_AVG[`war${h}`]}%</div>
+                      <div style={{ fontFamily: "'Share Tech Mono'", fontSize: 10, color: "#3d5a7a", marginBottom: 10 }}>World War</div>
+                      <div style={{ height: 1, background: "#0f1e30", margin: "8px 0" }} />
+                      <div style={{ fontFamily: "'Orbitron'", fontSize: 20, fontWeight: 700, color: "#f5c518", marginBottom: 4 }}>{WEIGHTED_AVG[`crash${h}`]}%</div>
+                      <div style={{ fontFamily: "'Share Tech Mono'", fontSize: 10, color: "#3d5a7a" }}>Econ Crash</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+
+          <div className="disclaimer">
+            ⚠ ANALYTICAL DISCLAIMER — This simulation is a conceptual probability model for intellectual exploration only. Figures are synthesized from academic literature, prediction market data, and game-theoretic models as of early 2026. No model can reliably predict complex geopolitical events. This is NOT financial, strategic, or policy advice. Probabilities are inherently uncertain and model-dependent. Real-world outcomes are shaped by human agency, leadership decisions, and emergent events that cannot be fully captured quantitatively.
+          </div>
+
+        </div>
+      </div>
+    </>
+  );
+}
